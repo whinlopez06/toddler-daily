@@ -1,0 +1,4 @@
+CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION sail;
+CREATE DATABASE toddler_daily_test OWNER sail;
+\connect toddler_daily_test
+CREATE SCHEMA IF NOT EXISTS app AUTHORIZATION sail;

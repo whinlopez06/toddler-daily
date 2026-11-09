@@ -1,0 +1,18 @@
+{
+  "backend/app/Support/DemoEnvironment.php": "c95a5d71ef0b3905684b067c8630289e6f11bd972c5387a803c474f8f77fcf14",
+  "backend/app/Http/Middleware/DemoAccess.php": "432b5af19df54c03d6beed0ea881af582f9682ad6def8f4bb2e5bfac2c2e1736",
+  "backend/app/Providers/FortifyServiceProvider.php": "bd88bcb0ffb6d1d3eaee25c8f83799df27809652108a46a89789751af7408f73",
+  "backend/app/Providers/AppServiceProvider.php": "0de0676b4ff4f5ddb09870f472407d0dab5556283359bebea7783aa7c1be6d48",
+  "backend/app/Actions/Appointments/PlanReminders.php": "3004dbd179433621e81cb9766e8a41071a7318b03bd9a8bf68c96a62ab080e42",
+  "backend/app/Actions/Appointments/DeliverReminder.php": "8f5828f8791c79d8531eb52d231fbe142a83b0822de12f750b23d5d8b7cbaa3b",
+  "backend/app/Actions/Accounts/ResetUserPassword.php": "f3671340b0dbf3644b67d25f4417a0925bf39ad2cdc64289a8a7d129e6c50f5b",
+  "backend/app/Http/Controllers/DemoController.php": "0e43e62a3acb6f0dc3fee9a9e941ea453b476ee208092fdeb4027e8867f59f02",
+  "backend/config/demo.php": "72f9e23efc2f27e0d4f210bcde72ff26e194ba5b0085f48b694f7925e2d49168",
+  "backend/.env.example": "c433e7af1712b6c37869d3b66a68a4181ee8ec6dd788accc3fb44dec896f74d4",
+  "backend/app/Console/Commands/InitializeDemo.php": "5ccf4ed8e680768122071dc8e689a4df5696abf768eb050b5e80a809d3907305",
+  "backend/app/Console/Commands/DemoReport.php": "3120476652a8d0da337b44462e41af7eb5586590fc77bd1c2e86c303ea5f803b",
+  "backend/app/Console/Commands/RevokeDemo.php": "e98ac6bcb8898feec57b92c19c2535708a45ec813b7f0408fd02f9d8fe7d0dd3",
+  "frontend/src/app/features/auth/auth-page.ts": "3da9c2170aaae411e7385049bae98a49e051731e032f04b19290a8177e9c225a",
+  "backend/tests/Feature/DemoAccessTest.php": "86f3be06c802a243f4b40e2fae18e4261ce8f093adfffa6b012e2054b630ea73",
+  "frontend/src/app/features/auth/auth-page.spec.ts": "ca3a1e514b4cf18981aeb0283108724dff997fd53a31631eafe49e22991beee1"
+}

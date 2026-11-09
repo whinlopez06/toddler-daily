@@ -1,0 +1,441 @@
+--- a/backend/app/Support/DemoEnvironment.php
++++ b/backend/app/Support/DemoEnvironment.php
+@@ -2,26 +2,19 @@
+ 
+ namespace App\Support;
+ 
+-use App\Models\User;
+-use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Facades\Schema;
+ 
+ class DemoEnvironment
+ {
+     public function ready(): bool
+     {
+-        if (! config('demo.enabled') || ! config('demo.database') || ! Schema::hasTable('demo_installations')) {
+-            return false;
+-        }
+-        $database = DB::selectOne('select current_database() as name')->name;
+-
+-        return $database === config('demo.database')
+-            && DB::table('demo_installations')->where('id', 1)->where('database_name', $database)->exists()
+-            && ! User::whereDoesntHave('demoAccount')->exists();
++        return (bool) config('demo.enabled')
++            && Schema::hasTable('demo_accounts')
++            && Schema::hasTable('demo_access_events');
+     }
+ 
+     public function requireReady(): void
+     {
+-        abort_unless($this->ready(), 503, 'The isolated demo is not available.');
++        abort_unless($this->ready(), 503, 'Demo access is not available.');
+     }
+ }
+--- a/backend/app/Http/Middleware/DemoAccess.php
++++ b/backend/app/Http/Middleware/DemoAccess.php
+@@ -12,15 +12,20 @@
+ {
+     public function handle(Request $request, Closure $next): Response
+     {
+-        if (config('demo.enabled')) {
+-            app(DemoEnvironment::class)->requireReady();
+-            abort_if($request->is('auth/register', 'auth/forgot-password', 'auth/reset-password', 'auth/email/*'), 403,
+-                'Account registration, recovery and email verification are unavailable in the demo.');
++        // Recovery remains available to ordinary accounts on the same site.
++        if ($request->is('auth/forgot-password', 'auth/reset-password') && is_string($request->input('email'))) {
++            $account = \App\Models\User::where('email', mb_strtolower(trim($request->input('email'))))->first();
++            if ($account?->demoAccount) {
++                if ($request->is('auth/forgot-password')) {
++                    return response()->json(['message' => 'If this address has an eligible account, a reset link has been sent.']);
++                }
++                throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'Password recovery is unavailable for demo accounts.']);
++            }
+         }
+ 
+         $demo = $request->user()?->demoAccount()->first();
+         if ($demo && ! $request->is('auth/logout')) {
+-            if (! config('demo.enabled') || ! $demo->active()) {
++            if (! app(DemoEnvironment::class)->ready() || ! $demo->active()) {
+                 if (! $demo->expires_at->isFuture()) {
+                     $demo->recordExpiry();
+                 }
+@@ -32,6 +37,7 @@
+ 
+                 return response()->json(['message' => 'Demo access has expired or been disabled. Your visit history has been retained.', 'code' => 'DEMO_EXPIRED'], 401);
+             }
++            abort_if($request->is('auth/email/*'), 403, 'Demo email addresses are not verified.');
+             abort_if($request->is('api/v1/family') && $request->isMethod('DELETE'), 403,
+                 'Demo access expires automatically. Contact the portfolio owner to request removal of your visit history.');
+         }
+--- a/backend/app/Providers/FortifyServiceProvider.php
++++ b/backend/app/Providers/FortifyServiceProvider.php
+@@ -26,14 +26,11 @@
+                 return null;
+             }
+             $demo = $user->demoAccount;
+-            if ($demo && (!config('demo.enabled') || !$demo->active())) {
++            if ($demo && (!app(\App\Support\DemoEnvironment::class)->ready() || !$demo->active())) {
+                 if (!$demo->expires_at->isFuture()) {
+                     $demo->recordExpiry();
+                 }
+                 throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'Demo access has expired or been disabled. Signing in cannot extend it.']);
+-            }
+-            if (config('demo.enabled') && !$demo) {
+-                return null;
+             }
+ 
+             return $user;
+--- a/backend/app/Providers/AppServiceProvider.php
++++ b/backend/app/Providers/AppServiceProvider.php
+@@ -37,7 +37,7 @@
+             $event->user?->demoAccount?->recordEvent('logout');
+         });
+         \Illuminate\Support\Facades\Event::listen(\Illuminate\Notifications\Events\NotificationSending::class, function ($event) {
+-            if ($event->channel === 'mail' && (config('demo.enabled') || ($event->notifiable instanceof \App\Models\User && $event->notifiable->demoAccount))) {
++            if ($event->channel === 'mail' && ($event->notifiable instanceof \App\Models\User && $event->notifiable->demoAccount)) {
+                 return false;
+             }
+         });
+--- a/backend/app/Actions/Appointments/PlanReminders.php
++++ b/backend/app/Actions/Appointments/PlanReminders.php
+@@ -9,7 +9,7 @@
+ {
+     public function handle(Appointment $appointment): void
+     {
+-        if ($appointment->child->family->owner->demoAccount || config('demo.enabled')) {
++        if ($appointment->child->family->owner->demoAccount) {
+             $appointment->deliveries()->whereIn('status', ['pending', 'processing'])->update(['status' => 'cancelled']);
+             return;
+         }
+--- a/backend/app/Actions/Appointments/DeliverReminder.php
++++ b/backend/app/Actions/Appointments/DeliverReminder.php
+@@ -19,7 +19,7 @@
+             $appointment = $appointment ? Appointment::whereKey($appointment->id)->lockForUpdate()->first() : null;
+             $delivery = ReminderDelivery::whereKey($claimed->id)->lockForUpdate()->firstOrFail();
+             if ($delivery->status !== 'processing') return $delivery->status;
+-            if (config('demo.enabled') || $delivery->user->demoAccount) {
++            if ($delivery->user->demoAccount) {
+                 $delivery->update(['status' => 'cancelled', 'locked_until' => null]);
+                 return 'cancelled';
+             }
+--- a/backend/app/Actions/Accounts/ResetUserPassword.php
++++ b/backend/app/Actions/Accounts/ResetUserPassword.php
+@@ -10,6 +10,9 @@
+ {
+     public function reset($user, array $input): void
+     {
++        if ($user->demoAccount) {
++            throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'Password recovery is unavailable for demo accounts.']);
++        }
+         Validator::make($input, ['password' => ['required', 'string', 'max:128', Password::min(12), 'confirmed']])->validate();
+         $user->forceFill(['password' => $input['password']])->save();
+         \Illuminate\Support\Facades\DB::table('sessions')->where('user_id', $user->id)->delete();
+--- a/backend/app/Http/Controllers/DemoController.php
++++ b/backend/app/Http/Controllers/DemoController.php
+@@ -17,7 +17,7 @@
+ {
+     public function options(DemoEnvironment $environment): JsonResponse
+     {
+-        return response()->json(['data' => ['demo_mode' => (bool) config('demo.enabled'), 'available' => $environment->ready()]]);
++        return response()->json(['data' => ['demo_mode' => false, 'available' => $environment->ready()]]);
+     }
+ 
+     public function store(Request $request, DemoEnvironment $environment): JsonResponse
+@@ -33,9 +33,9 @@
+             'privacy_accepted' => ['accepted'],
+         ]);
+         $user = DB::transaction(function () use ($data) {
+-            DB::table('demo_installations')->where('id', 1)->lockForUpdate()->first();
++            DB::select('select pg_advisory_xact_lock(74103001)');
+             if (User::where('email', $data['email'])->exists()) {
+-                throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'This email address already has a demo account.']);
++                throw \Illuminate\Validation\ValidationException::withMessages(['email' => 'This email address already has an account.']);
+             }
+             abort_if(DemoAccount::count() >= config('demo.total_accounts') ||
+                 DemoAccount::where('started_at', '>=', now()->startOfDay())->count() >= config('demo.daily_accounts'),
+--- a/backend/config/demo.php
++++ b/backend/config/demo.php
+@@ -2,7 +2,6 @@
+ 
+ return [
+     'enabled' => (bool) env('DEMO_MODE', false),
+-    'database' => env('DEMO_DATABASE_NAME'),
+     'daily_accounts' => 30,
+     'total_accounts' => 100,
+     'events_per_account' => 200,
+--- a/backend/.env.example
++++ b/backend/.env.example
+@@ -1,7 +1,6 @@
+ APP_NAME="Toddler Daily"
+-# Enable only on a separately migrated, empty demo database. Run tracker:demo-init once.
++# Optional guest access in this application database; ordinary family authorization still applies.
+ DEMO_MODE=false
+-DEMO_DATABASE_NAME=
+ APP_ENV=local
+ APP_KEY=
+ APP_DEBUG=true
+--- a/backend/app/Console/Commands/InitializeDemo.php
++++ b/backend/app/Console/Commands/InitializeDemo.php
+@@ -2,38 +2,21 @@
+ 
+ namespace App\Console\Commands;
+ 
+-use App\Models\Family;
+-use App\Models\User;
++use App\Support\DemoEnvironment;
+ use Illuminate\Console\Command;
+-use Illuminate\Support\Facades\DB;
+ 
+ class InitializeDemo extends Command
+ {
+     protected $signature = 'tracker:demo-init';
++    protected $description = 'Check shared-database demo readiness without changing any data';
+ 
+-    protected $description = 'Mark an empty, separately configured database as the portfolio demo';
+-
+-    public function handle(): int
++    public function handle(DemoEnvironment $environment): int
+     {
+-        $database = DB::selectOne('select current_database() as name')->name;
+-        $testDatabase = app()->environment('testing') && $database === 'toddler_daily_test';
+-        if (! config('demo.enabled') || $database !== config('demo.database') || (! str_ends_with($database, '_demo') && ! $testDatabase)) {
+-            $this->error('Set DEMO_MODE=true and DEMO_DATABASE_NAME to the separate connected database ending in _demo. Never use a personal or pilot database.');
+-
++        if (! $environment->ready()) {
++            $this->error('Apply the demo-table migration and explicitly enable DEMO_MODE first.');
+             return self::FAILURE;
+         }
+-
+-        return DB::transaction(function () use ($database) {
+-            DB::select('select pg_advisory_xact_lock(74103001)');
+-            if (DB::table('demo_installations')->exists() || User::exists() || Family::exists()) {
+-                $this->error('Initialization requires an empty, uninitialized database. No records were changed.');
+-
+-                return self::FAILURE;
+-            }
+-            DB::table('demo_installations')->insert(['id' => 1, 'database_name' => $database, 'initialized_at' => now()]);
+-            $this->info('Isolated demo database initialized. Only fictional family records may be stored here.');
+-
+-            return self::SUCCESS;
+-        });
++        $this->info('Demo access is enabled alongside ordinary accounts. No initialization or data copy is required.');
++        return self::SUCCESS;
+     }
+ }
+--- a/backend/app/Console/Commands/DemoReport.php
++++ b/backend/app/Console/Commands/DemoReport.php
+@@ -16,7 +16,7 @@
+     public function handle(DemoEnvironment $environment): int
+     {
+         if (! $environment->ready()) {
+-            $this->error('This command requires the isolated demo environment.');
++            $this->error('Demo access must be configured and enabled to use this command.');
+ 
+             return self::FAILURE;
+         }
+--- a/backend/app/Console/Commands/RevokeDemo.php
++++ b/backend/app/Console/Commands/RevokeDemo.php
+@@ -16,7 +16,7 @@
+     public function handle(DemoEnvironment $environment): int
+     {
+         if (! $environment->ready()) {
+-            $this->error('This command requires the isolated demo environment.');
++            $this->error('Demo access must be configured and enabled to use this command.');
+ 
+             return self::FAILURE;
+         }
+--- a/frontend/src/app/features/auth/auth-page.ts
++++ b/frontend/src/app/features/auth/auth-page.ts
+@@ -47,7 +47,7 @@
+           <label for="email">Email address</label><input id="email" class="form-control" type="email" formControlName="email" [attr.aria-invalid]="fieldMessage('email') ? true : null" [attr.aria-describedby]="descriptionFor('email')" autocomplete="email" required>
+             <ng-container [ngTemplateOutlet]="validation" [ngTemplateOutletContext]="{ $implicit: 'email' }" />
+           @if (mode !== 'forgot-password') {
+-            <div class="password-label"><label for="password">Password</label>@if (mode === 'login' && !auth.demoOptions()?.demo_mode) { <a routerLink="/forgot-password">Forgot password?</a> }</div><input id="password" class="form-control" type="password" formControlName="password" [attr.aria-invalid]="fieldMessage('password') ? true : null" [attr.aria-describedby]="descriptionFor('password')" [attr.autocomplete]="mode === 'login' ? 'current-password' : 'new-password'"  required>
++            <div class="password-label"><label for="password">Password</label>@if (mode === 'login') { <a routerLink="/forgot-password">Forgot password?</a> }</div><input id="password" class="form-control" type="password" formControlName="password" [attr.aria-invalid]="fieldMessage('password') ? true : null" [attr.aria-describedby]="descriptionFor('password')" [attr.autocomplete]="mode === 'login' ? 'current-password' : 'new-password'"  required>
+             <ng-container [ngTemplateOutlet]="validation" [ngTemplateOutletContext]="{ $implicit: 'password' }" />
+             @if (mode !== 'login') {
+               <p id="password-help" class="field-help">Use at least 12 characters.</p>
+@@ -71,8 +71,8 @@
+         </form>
+         <div class="auth-links">
+           @if (mode === 'login') {
+-            @if (auth.demoOptions()?.demo_mode) { <p><a routerLink="/demo">Try the demo — free for 24 hours</a></p> }
+-            @else { <p>New to Toddler Daily? <a routerLink="/register">Create an account</a></p> }
++            <p>New to Toddler Daily? <a routerLink="/register">Create an account</a></p>
++            @if (auth.demoOptions()?.available) { <p><a routerLink="/demo">Try the demo — free for 24 hours</a></p> }
+           }
+           @else { <a routerLink="/login">Back to sign in</a> }
+         </div>
+@@ -105,9 +105,7 @@
+   get introduction(): string { return ({ demo: 'Explore a private demo, free for 24 hours.', login: 'Sign in to your private family record.', register: 'Create a private account for your family.', 'forgot-password': 'Enter your email to request a password reset link.', 'reset-password': 'Choose a new password for your family account.' } as Record<string,string>)[this.mode]; }
+   get actionLabel(): string { return ({ demo: 'Start my 24-hour demo', login: 'Sign in', register: 'Create account', 'forgot-password': 'Send reset link', 'reset-password': 'Save password' } as Record<string,string>)[this.mode]; }
+   constructor() {
+-    void this.auth.loadOptions().then(() => {
+-      if (this.auth.demoOptions()?.demo_mode && ['register', 'forgot-password', 'reset-password'].includes(this.mode)) void this.router.navigateByUrl('/demo');
+-    }).catch(() => { if (this.mode === 'demo') this.error.set('Demo availability could not be checked. Refresh to try again.'); });
++    void this.auth.loadOptions().catch(() => { if (this.mode === 'demo') this.error.set('Demo availability could not be checked. Refresh to try again.'); });
+     if (this.mode !== 'forgot-password') this.form.controls.password.addValidators(Validators.required);
+     if (['register','demo','reset-password'].includes(this.mode)) {
+       this.form.controls.password.addValidators([Validators.minLength(12), Validators.maxLength(128)]);
+--- a/backend/tests/Feature/DemoAccessTest.php
++++ b/backend/tests/Feature/DemoAccessTest.php
+@@ -27,8 +27,7 @@
+ 
+     private function enableDemo(): void
+     {
+-        config(['demo.enabled' => true, 'demo.database' => 'toddler_daily_test']);
+-        $this->artisan('tracker:demo-init')->assertSuccessful();
++        config(['demo.enabled' => true]);
+     }
+ 
+     private function payload(): array
+@@ -48,19 +47,18 @@
+         return $user;
+     }
+ 
+-    public function test_demo_is_disabled_by_default_and_requires_an_empty_separate_database(): void
++    public function test_demo_requires_opt_in_but_allows_existing_ordinary_accounts(): void
+     {
+         config(['demo.enabled' => false]);
++        $personal = $this->owner(false);
+         $this->postJson('/auth/demo', $this->payload())->assertStatus(503);
+-        $this->assertDatabaseCount('users', 0);
+-        config(['demo.enabled' => true, 'demo.database' => 'wrong_database_demo']);
+-        $this->artisan('tracker:demo-init')->assertFailed();
+-        $this->postJson('/auth/demo', $this->payload())->assertStatus(503);
+-        config(['demo.database' => 'toddler_daily_test']);
+-        $this->owner(false);
+-        $this->artisan('tracker:demo-init')->assertFailed();
++        $this->enableDemo();
++        $this->artisan('tracker:demo-init')->assertSuccessful();
+         $this->assertDatabaseCount('demo_installations', 0);
+-        $this->postJson('/auth/demo', $this->payload())->assertStatus(503);
++        $this->postJson('/auth/demo', $this->payload())->assertCreated();
++        $this->assertDatabaseCount('users', 2);
++        $this->assertDatabaseHas('families', ['owner_user_id' => $personal->id]);
++        $this->getJson('/auth/demo-options')->assertOk()->assertJsonPath('data.available', true)->assertJsonPath('data.demo_mode', false);
+     }
+ 
+     public function test_signup_creates_only_its_private_sample_family_and_never_verifies_email(): void
+@@ -122,18 +120,16 @@
+         $this->travelBack();
+     }
+ 
+-    public function test_personal_accounts_cannot_be_exposed_by_turning_on_demo_mode(): void
+-    {
+-        $this->enableDemo();
+-        $demo = $this->owner(true);
+-        $personal = $this->owner(false);
+-        $child = $personal->family->children()->create(['display_name' => 'Synthetic private child', 'birth_date' => '2024-01-01']);
+-        $this->actingAs($demo)->getJson('/api/v1/children/'.$child->id)->assertStatus(503)->assertDontSee('Synthetic private child');
+-        $this->getJson('/api/v1/dashboard')->assertStatus(503);
+-        $this->actingAs($personal)->getJson('/api/v1/dashboard')->assertStatus(503);
+-        config(['demo.enabled' => false]);
+-        $this->actingAs($demo)->getJson('/api/v1/children/'.$child->id)->assertUnauthorized();
+-        $this->actingAs($personal)->getJson('/api/v1/children/'.$child->id)->assertOk();
++    public function test_demo_cannot_access_personal_family_in_the_same_database(): void
++    {
++        $this->enableDemo();
++        $this->assertIsolation(true, false);
++    }
++
++    public function test_personal_account_cannot_access_demo_family_in_the_same_database(): void
++    {
++        $this->enableDemo();
++        $this->assertIsolation(false, true);
+     }
+ 
+     public function test_demo_accounts_cannot_access_another_demo_family(): void
+@@ -147,10 +143,10 @@
+         $this->assertIsolation(false);
+     }
+ 
+-    private function assertIsolation(bool $demo): void
++    private function assertIsolation(bool $demo, ?bool $otherDemo = null): void
+     {
+         $owner = $this->owner($demo);
+-        $other = $this->owner($demo);
++        $other = $this->owner($otherDemo ?? $demo);
+         $own = $owner->family->children()->create(['display_name' => 'Own sample child', 'birth_date' => '2024-01-01']);
+         $foreign = $other->family->children()->create(['display_name' => 'Foreign private child', 'birth_date' => '2024-01-01']);
+         $entry = TimelineEntry::create(['child_id' => $foreign->id, 'created_by' => $other->id,
+@@ -210,19 +206,20 @@
+         $this->assertNull($notification->fresh()->read_at);
+     }
+ 
+-    public function test_demo_rejects_normal_signup_email_and_self_deletion(): void
++    public function test_demo_rejects_its_own_recovery_email_and_self_deletion(): void
+     {
+         $this->enableDemo();
+         Mail::fake();
+         Notification::fake();
+-        foreach (['register', 'forgot-password', 'reset-password'] as $path) {
+-            $this->postJson('/auth/'.$path, $this->payload())->assertForbidden();
+-        }
++        $demoUser = $this->owner(true);
++        $this->postJson('/auth/forgot-password', ['email' => $demoUser->email])->assertOk();
++        $this->assertDatabaseCount('password_reset_tokens', 0);
++        $this->postJson('/auth/reset-password', ['email' => $demoUser->email])->assertUnprocessable();
+         $this->postJson('/auth/demo', $this->payload())->assertCreated();
+         $this->postJson('/auth/email/verification-notification')->assertForbidden();
+         $this->patchJson('/api/v1/me', ['email_reminders_enabled' => true])->assertForbidden();
+         $this->withSession(['auth.password_confirmed_at' => time()])->deleteJson('/api/v1/family', ['confirm' => true, 'family_name' => 'My demo family'])->assertForbidden();
+-        $child = User::firstOrFail()->family->children()->firstOrFail();
++        $child = User::where('email', $this->payload()['email'])->firstOrFail()->family->children()->firstOrFail();
+         $this->postJson('/api/v1/children/'.$child->id.'/appointments', ['title' => 'Fictional appointment',
+             'kind' => 'general', 'starts_at' => now()->addDays(2)->toIso8601String(), 'timezone' => 'Asia/Manila', 'status' => 'scheduled', 'reminders_enabled' => true])->assertCreated();
+         $this->assertDatabaseCount('reminder_deliveries', 0);
+@@ -289,4 +286,27 @@
+         $this->patchJson('/api/v1/me', ['name' => 'Rejected change'])->assertStatus(429)->assertHeader('Retry-After');
+         $this->assertSame('Demo visitor', $owner->fresh()->name);
+     }
++
++    public function test_normal_login_and_unverified_signup_still_work_with_demo_enabled(): void
++    {
++        $this->enableDemo();
++        Notification::fake();
++        $personal = $this->owner(false);
++        $personal->update(['password' => 'synthetic-normal-password']);
++        $this->postJson('/auth/login', ['email' => $personal->email, 'password' => 'synthetic-normal-password'])->assertOk();
++        $this->getJson('/api/v1/me')->assertOk()->assertJsonPath('data.is_demo', false);
++        $this->postJson('/auth/logout')->assertNoContent();
++        $this->postJson('/auth/register', [...$this->payload(), 'name' => 'Synthetic parent', 'family_name' => 'Synthetic regular family', 'timezone' => 'Asia/Manila'])->assertCreated();
++        $this->getJson('/api/v1/children')->assertForbidden();
++    }
++
++    public function test_normal_recovery_is_available_with_demo_enabled(): void
++    {
++        $this->enableDemo();
++        Notification::fake();
++        $personal = $this->owner(false);
++        $this->postJson('/auth/forgot-password', ['email' => $personal->email])->assertOk();
++        $this->assertDatabaseHas('password_reset_tokens', ['email' => $personal->email]);
++        Notification::assertSentTo($personal, \Illuminate\Auth\Notifications\ResetPassword::class);
++    }
+ }
+--- a/frontend/src/app/features/auth/auth-page.spec.ts
++++ b/frontend/src/app/features/auth/auth-page.spec.ts
+@@ -25,6 +25,14 @@
+     timezone: 'Asia/Manila', privacy_accepted: true };
+   beforeEach(() => { mode = 'register'; vi.resetAllMocks(); auth.loadOptions.mockResolvedValue(undefined); auth.demoOptions.set({ demo_mode: false, available: false }); });
+ 
++  it('offers ordinary sign-in and demo entry on the same login page', () => {
++    mode = 'login'; auth.demoOptions.set({ demo_mode: false, available: true });
++    const fixture = setup();
++    for (const path of ['/demo', '/register', '/forgot-password']) {
++      expect(fixture.nativeElement.querySelector(`a[href="${path}"]`)).not.toBeNull();
++    }
++  });
++
+   it('starts a demo without family details or verification and requires privacy acknowledgement', async () => {
+     mode = 'demo'; auth.demoOptions.set({ demo_mode: true, available: true });
+     const fixture = setup(); const page = fixture.componentInstance;
+@@ -40,7 +48,7 @@
+     expect(navigate).toHaveBeenCalledWith('/');
+   });
+ 
+-  it('does not submit when the isolated demo is unavailable', async () => {
++  it('does not submit when the demo is unavailable', async () => {
+     mode = 'demo'; const fixture = setup(); const page = fixture.componentInstance;
+     page.form.patchValue(valid); await page.submit();
+     expect(auth.submit).not.toHaveBeenCalled();
