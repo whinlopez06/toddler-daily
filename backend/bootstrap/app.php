@@ -22,6 +22,7 @@ return Application::configure(basePath: dirname(__DIR__))
         $middleware->prependToPriorityList(\Illuminate\Routing\Middleware\ThrottleRequests::class, \App\Http\Middleware\RecentPassword::class);
         $middleware->alias(['active.family' => \App\Http\Middleware\ActiveFamily::class,
             'demo.access' => \App\Http\Middleware\DemoAccess::class,
+            'signed' => \App\Http\Middleware\ValidateVerificationSignature::class,
             'verified.or.demo' => \App\Http\Middleware\VerifiedOrDemo::class,
             'recent.password' => \App\Http\Middleware\RecentPassword::class]);
         $middleware->redirectGuestsTo(fn () => '/login');
