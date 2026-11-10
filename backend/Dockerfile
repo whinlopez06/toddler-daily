@@ -7,6 +7,10 @@ RUN apt-get update \
     && cp "$PHP_INI_DIR/php.ini-production" "$PHP_INI_DIR/php.ini" \
     && a2enmod rewrite
 
+# Render mounts runtime secret files with group ID 1000.
+RUN if ! getent group 1000 >/dev/null; then groupadd --gid 1000 render-secrets; fi \
+    && usermod --append --groups 1000 www-data
+
 COPY --from=composer:2 /usr/bin/composer /usr/local/bin/composer
 
 ENV PORT=10000
